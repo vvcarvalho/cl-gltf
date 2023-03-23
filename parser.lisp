@@ -127,23 +127,40 @@
   (let ((skip (if (typep stream 'file-stream)
                   (lambda (i) (file-position stream (+ (file-position stream) i)))
                   (lambda (i) (loop repeat i do (read-byte stream)))))
-        (gltf (make-instance 'gltf :uri NIL)))
+        (gltf (make-instance 'gltf :uri NIL))
+        (json NIL))
     (loop for length = (handler-case (nibbles:read-ub32/le stream)
                          (end-of-file () NIL))
           while length
           do (let ((type (nibbles:read-ub32/le stream)))
                (case type
                  (#x4E4F534A           ; JSON
-                  (parse-from (com.inuoe.jzon:parse stream :max-string-length NIL) gltf gltf))
+                  (setf json (com.inuoe.jzon:parse (com.inuoe.jzon:span stream :end length)
+                                                   :max-string-length NIL)))
                  (#x004E4942           ; BIN
                   (let ((buffer (static-vectors:make-static-vector length)))
                     (read-sequence buffer stream)
-                    (change-class (svref (buffers gltf) 0) 'static-buffer :buffer buffer)))
+                    (setf (buffers gltf)
+                          (make-array 1
+                                      :initial-element
+                                      (make-instance 'static-buffer
+                                                     :buffer buffer
+                                                     :start (static-vectors:static-vector-pointer buffer)
+                                                     :gltf gltf
+                                                     :byte-length (length buffer))))))
                  (#x00000000           ; EOF
                   (return))
                  (T
                   (warn "Unknown glb block type ~8,'0x" type)
                   (funcall skip length)))))
+    ;; HACK: Ugly, disgraceful and dishonorable.
+    ;; We accumulate the binary chunks and process them by inserting directly onto GLTF
+    ;; Buffers must be a list since there is at least one chunk.
+    (setf (gethash "buffers" json) nil)
+    (loop :for i :from 0
+          :for b :across (buffers gltf) :do
+          (setf (idx b) i))
+    (parse-from json gltf gltf)
     gltf))
 
 (defun parse-glb-memory (ptr start end)
